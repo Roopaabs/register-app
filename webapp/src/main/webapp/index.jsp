@@ -36,6 +36,5 @@
    <h1> Happy Learning. See You Again. </h1>
    <h1>Devops ci using jenkins and docker</h1>
    <br>
-   <h1>devops cd using eks and argocd</h1>
    
 </form>
