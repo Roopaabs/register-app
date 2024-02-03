@@ -1,31 +1,43 @@
 pipeline {
     agent { label 'Jenkins-Agent' }
-    tools {
-        jdk 'Java17'
-        maven 'Maven3'
+    
+    tools{
+        jdk 'JDK'
+        maven 'Maven'
+        //sonarqubeScanner 'SonarQube' // Make sure 'SonarQube' matches the tool installation in Jenkins
+  
+       
+        
     }
-    environment {
-	    APP_NAME = "register-app-pipeline"
-            RELEASE = "1.0.0"
-            DOCKER_USER = "roopabs"
-            DOCKER_PASS = 'dockerhub@7'
-            IMAGE_NAME = "${DOCKER_USER}" + "/" + "${APP_NAME}"
-            IMAGE_TAG = "${RELEASE}-${BUILD_NUMBER}"
+    
+    environment{
+        PATH = "/home/ubuntu/.nvm/versions/node/v18.18.2/bin:$PATH"
+        DC_HOME= tool 'OWASP-DependencyCheck'
+        APP_NAME = "register-app-pipeline"
+        RELEASE = "1.0.0"
+        DOCKER_USER = "roopabs"
+        DOCKER_PASS = 'dockerhub@7'
+        IMAGE_NAME = "${DOCKER_USER}" + "/" + "${APP_NAME}"
+        IMAGE_TAG = "${RELEASE}-${BUILD_NUMBER}"
 	    JENKINS_API_TOKEN = credentials("JENKINS_API_TOKEN")
     }
-    stages{
+
+    stages {
+        
         stage("Cleanup Workspace"){
                 steps {
                 cleanWs()
                 }
         }
-
-        stage("Checkout from SCM"){
-                steps {
-                    git branch: 'main', credentialsId: 'github', url: 'https://github.com/Roopabs/register-app.git'
-                }
+        
+        stage('git-clone') {
+            steps {
+                echo 'git-clone'
+                git branch: 'main', credentialsId: 'git_credential', url: 'https://github.com/Roopaabs/register-app.git'
+            }
         }
-
+        
+        
         stage("Build Application"){
             steps {
                 sh "mvn clean package"
@@ -38,51 +50,78 @@ pipeline {
                  sh "mvn test"
            }
        }
-
-       stage("SonarQube Analysis"){
-           steps {
-	           script {
-		        withSonarQubeEnv(credentialsId: 'jenkins-sonarqube-token') { 
-                        sh "mvn sonar:sonar"
-		        }
-	           }	
-           }
-       }
-
-       stage("Quality Gate"){
+        
+        stage('SonarQube Analysis') {
+            steps {
+                script {
+                    def scannerHome = tool 'SonarQube'
+            
+                    withSonarQubeEnv('SonarQube') {
+                    sh "mvn clean verify sonar:sonar \
+                     -Dsonar.projectKey=register-app \
+                     -Dsonar.projectName='register-app' \
+                     -Dsonar.host.url=http://52.22.3.214:9000 \
+                     -Dsonar.token=squ_f90b4538b67c83fc8fe48a30264bafdea571b9e5"
+                     }
+                }
+            }
+        }
+        
+        stage("Quality Gate"){
            steps {
                script {
-                    waitForQualityGate abortPipeline: false, credentialsId: 'jenkins-sonarqube-token'
+                    waitForQualityGate abortPipeline: false, credentialsId: 'sonar-credential'
                 }	
             }
 
         }
-
-        stage("Build & Push Docker Image") {
+        
+        
+        stage('build') {
+            steps {
+                echo 'build the package'
+                sh 'mvn package -DskipTests=true'
+            }
+        }
+        
+        
+        
+        stage('build and tag docker image'){
             steps {
                 script {
-                    docker.withRegistry('',DOCKER_PASS) {
+                    withDockerRegistry(credentialsId: 'dockerhub', toolName: 'Docker') {
+                
                         docker_image = docker.build "${IMAGE_NAME}"
+                       
                     }
-
-                    docker.withRegistry('',DOCKER_PASS) {
+                    
+                    withDockerRegistry(credentialsId: 'dockerhub', toolName: 'Docker') 
+                    {
+                
                         docker_image.push("${IMAGE_TAG}")
                         docker_image.push('latest')
+                        
                     }
                 }
             }
-
-       }
-
-       stage("Trivy Scan") {
-           steps {
-               script {
-	            sh ('docker run -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy image roopabs/register-app-pipeline:latest --no-progress --scanners vuln  --exit-code 0 --severity HIGH,CRITICAL --format table')
-               }
-           }
-       }
-
-       stage ('Cleanup Artifacts') {
+        }
+        
+        stage('Trivy FS Scan') {
+            steps {
+                script {
+                    try {
+                        echo 'Running Trivy Docker image scan or file system scan'
+                        sh ('docker run -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy image roopabs/register-app-pipeline:latest --no-progress --scanners vuln --exit-code 0 --severity HIGH,CRITICAL --format table')
+                    } 
+                    catch (Exception e) {
+                        echo "Error during Trivy scan: ${e.getMessage()}"
+                        currentBuild.result = 'UNSTABLE' // Mark the build as unstable on failure
+                    }
+                }
+            }
+        }
+        
+        stage ('Cleanup Artifacts') {
            steps {
                script {
                     sh "docker rmi ${IMAGE_NAME}:${IMAGE_TAG}"
@@ -90,26 +129,18 @@ pipeline {
                }
           }
        }
-
+       
        stage("Trigger CD Pipeline") {
             steps {
                 script {
-                    sh "curl -v -k --user clouduser:${JENKINS_API_TOKEN} -X POST -H 'cache-control: no-cache' -H 'content-type: application/x-www-form-urlencoded' --data 'IMAGE_TAG=${IMAGE_TAG}' 'ec2-13-232-128-192.ap-south-1.compute.amazonaws.com:8080/job/gitops-register-app-cd/buildWithParameters?token=gitops-token'"
+                    sh "curl -v -k --user clouduser:${JENKINS_API_TOKEN} -X POST -H 'cache-control: no-cache' -H 'content-type: application/x-www-form-urlencoded' --data 'IMAGE_TAG=${IMAGE_TAG}' 'ec2-52-22-3-214.compute-1.amazonaws.com:8080/job/gitops-register-app-cd/buildWithParameters?token=gitops-token'"
                 }
             }
        }
+    
+        
+        
+       
     }
-
-    post {
-       failure {
-             emailext body: '''${SCRIPT, template="groovy-html.template"}''', 
-                      subject: "${env.JOB_NAME} - Build # ${env.BUILD_NUMBER} - Failed", 
-                      mimeType: 'text/html',to: "ashfaque.s510@gmail.com"
-      }
-      success {
-            emailext body: '''${SCRIPT, template="groovy-html.template"}''', 
-                     subject: "${env.JOB_NAME} - Build # ${env.BUILD_NUMBER} - Successful", 
-                     mimeType: 'text/html',to: "ashfaque.s510@gmail.com"
-      }      
-   }
 }
+
